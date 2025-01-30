@@ -3,7 +3,9 @@ name: Tests
 
 on:
   push:
-    branches: [ jexin/tests ]
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
   test:
