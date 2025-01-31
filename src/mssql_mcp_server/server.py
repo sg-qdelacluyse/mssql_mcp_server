@@ -16,7 +16,7 @@ logger = logging.getLogger("mssql_mcp_server")
 def get_db_config():
     """Get database configuration from environment variables."""
     config = {
-        "driver": os.getenv("MSSQL_DRIVER", "{SQL Server}"),
+        "driver": os.getenv("MSSQL_DRIVER", "SQL Server"),
         "server": os.getenv("MSSQL_HOST", "localhost"),
         "user": os.getenv("MSSQL_USER"),
         "password": os.getenv("MSSQL_PASSWORD"),
@@ -27,7 +27,7 @@ def get_db_config():
         logger.error("MSSQL_USER, MSSQL_PASSWORD, and MSSQL_DATABASE are required")
         raise ValueError("Missing required database configuration")
     
-    connection_string = f"Driver={config['driver']};Server={config['server']};UID={config['user']};PWD={config['password']};Database={config['database']};Trusted_Connection=yes;"
+    connection_string = f"Driver={config['driver']};Server={config['server']};UID={config['user']};PWD={config['password']};Database={config['database']};"
 
     return config, connection_string
 
@@ -41,7 +41,8 @@ async def list_resources() -> list[Resource]:
     try:
         with connect(connection_string) as conn:
             with conn.cursor() as cursor:
-                cursor.execute("SHOW TABLES")
+                # Use INFORMATION_SCHEMA to list tables in MSSQL
+                cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE';")
                 tables = cursor.fetchall()
                 logger.info(f"Found tables: {tables}")
                 
@@ -125,10 +126,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             with conn.cursor() as cursor:
                 cursor.execute(query)
                 
-                # Special handling for SHOW TABLES
-                if query.strip().upper().startswith("SHOW TABLES"):
+                # Special handling for listing tables in MSSQL
+                if query.strip().upper() == "SHOW TABLES":
+                    cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE';")
                     tables = cursor.fetchall()
-                    result = ["Tables_in_" + config["database"]]  # Header
+                    result = [f"Tables_in_{config['database']}"]  # Header
                     result.extend([table[0] for table in tables])
                     return [TextContent(type="text", text="\n".join(result))]
                 

@@ -52,7 +52,7 @@ To integrate with **Claude Desktop**, add this configuration to `claude_desktop_
         "mssql_mcp_server"
       ],
       "env": {
-        "MSSQL_DRIVER": "{mssql_driver}",
+        "MSSQL_DRIVER": "mssql_driver",
         "MSSQL_HOST": "localhost",
         "MSSQL_USER": "your_username",
         "MSSQL_PASSWORD": "your_password",
