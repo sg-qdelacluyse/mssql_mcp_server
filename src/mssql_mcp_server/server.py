@@ -33,16 +33,7 @@ class MicrosoftAzureSQL:
         self.__driver = '{ODBC Driver 17 for SQL Server}'
         self.__connection_string = f"Driver={ self.__driver };SERVER={ self.server };DATABASE={ self.database }"
         self.__connection = None
-        
-        # Log connection details (masking sensitive info)
-        logger.info("Initializing Azure SQL connection with:")
-        logger.info(f"Server: {self.server}")
-        logger.info(f"Database: {self.database}")
-        logger.info(f"Tenant ID: {self.__tenant_id}")
-        logger.info(f"Client ID: {self.__client_id[:4]}...{self.__client_id[-4:]}")
-        logger.info(f"Authority URL: {self.__authority_url}")
-        logger.info(f"Driver: {self.__driver}")
-        logger.info(f"Connection string (masked): Driver={self.__driver};SERVER={self.server};DATABASE={self.database}")
+
 
     def __convert_token(self,token: dict) -> bytes:
         """Converts a token obtained from Azure AD to a format usable by pyodbc."""
@@ -117,7 +108,17 @@ class MicrosoftAzureSQL:
 
 
 def get_db_config():
-    """Get database configuration from environment variables."""
+    """Get database configuration from environment variables and .env file."""
+    # Try to load .env file if it exists
+    if os.path.exists('.env'):
+        logger.info("Loading configuration from .env file")
+        with open('.env') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    key, value = line.split('=', 1)
+                    os.environ[key.strip()] = value.strip().strip('"')
+
     # Debug logging to see all environment variables
     logger.info("Available environment variables:")
     for key, value in os.environ.items():
@@ -136,7 +137,7 @@ def get_db_config():
     missing_vars = [key for key, value in config.items() if not value]
     if missing_vars:
         logger.error(f"Missing environment variables: {', '.join(missing_vars)}")
-        logger.error("Please check environment variables:")
+        logger.error("Please check environment variables or .env file:")
         logger.error("AZURE_SQL_HOST, AZURE_SQL_DATABASE, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and AZURE_TENANT_ID are required")
         raise ValueError("Missing required database configuration")
     
