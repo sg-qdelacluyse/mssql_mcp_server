@@ -4,6 +4,8 @@ import os
 import struct
 import adal
 import pyodbc
+from pathlib import Path
+from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.types import Resource, Tool, TextContent
 from pydantic import AnyUrl
@@ -110,14 +112,10 @@ class MicrosoftAzureSQL:
 def get_db_config():
     """Get database configuration from environment variables and .env file."""
     # Try to load .env file if it exists
-    if os.path.exists('.env'):
+    env_path = Path('.env')
+    if env_path.exists():
         logger.info("Loading configuration from .env file")
-        with open('.env') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    key, value = line.split('=', 1)
-                    os.environ[key.strip()] = value.strip().strip('"')
+        load_dotenv(env_path)
 
     # Debug logging to see all environment variables
     logger.info("Available environment variables:")
