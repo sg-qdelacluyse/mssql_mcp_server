@@ -6,13 +6,14 @@ import adal
 import pyodbc
 import pandas as pd
 import io
+import json
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 from pathlib import Path
 from dotenv import load_dotenv
 from mcp.server import Server
-from mcp.types import Resource, Tool, TextContent
+from mcp.types import Resource, Tool, TextContent, CallToolResult
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.models import InitializationOptions
 from pydantic import AnyUrl
@@ -23,6 +24,14 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("mssql_mcp_server")
+
+
+@dataclass
+class AzureSQLURI:
+    server: str
+    database: str
+    schema: str
+    table: str
 
 
 class MicrosoftAzureSQL:
@@ -78,6 +87,8 @@ class MicrosoftAzureSQL:
         converted_token = self.__convert_token(token)
 
         self.__connection = pyodbc.connect(self.__connection_string, attrs_before = { self.SQL_COPT_SS_ACCESS_TOKEN:converted_token })
+
+        return self.__connection
     
 
     def disconnect(self) -> None:
@@ -150,32 +161,189 @@ def get_db_config():
     
     return config
 
-def dict_list_to_csv(data: list[dict]) -> str:
-    """Convert a list of flat dictionaries to CSV string.
-    
-    Args:
-        data: List of dictionaries where each dictionary has the same keys
-            and only contains simple values (no nested structures)
-            
-    Returns:
-        String containing CSV data with headers
+
+def get_all_table_query() -> str:
+    """Get a query to get all tables in the Azure SQL database."""
+    return """
+        SELECT 
+            [SchemaName]
+            ,[TableName]
+            ,[SourceSystem]
+            ,[RowCounts]
+        FROM log.EDWAllTablesVw
+        WHERE [SchemaName] = 'EDW'
     """
-    if not data:
-        return ""
+
+def get_table_schema_query(schema: str, table: str) -> str:
+    """Get a query to get the schema of a table in the Azure SQL database."""
+    return f"""
+        SELECT 
+            [SchemaName]
+            ,[TableName]
+            ,[ColumnName]
+            ,[ColumnID]
+            ,[DataType]
+            ,[CharacterLength]
+        FROM [Log].[TableColumnVW]
+        WHERE [SchemaName] = '{schema}'
+            AND [TableName] = '{table}'
+    """
+
+def parse_uri(uri: AnyUrl) -> AzureSQLURI:
+    """Parse the URI to get the server, database, and table name."""
+    parts = uri.split('/')
+    server = parts[2]
+    database = parts[3]
+    schema = parts[4]
+    table = parts[5]
+
+    return AzureSQLURI(server=server, database=database, schema=schema, table=table)
+
+# def dict_list_to_csv(data: list[dict]) -> str:
+#     """Convert a list of flat dictionaries to CSV string.
+    
+#     Args:
+#         data: List of dictionaries where each dictionary has the same keys
+#             and only contains simple values (no nested structures)
+            
+#     Returns:
+#         String containing CSV data with headers
+#     """
+#     if not data:
+#         return ""
         
 
-    # Convert list of dicts to DataFrame
-    df = pd.DataFrame(data)
+#     # Convert list of dicts to DataFrame
+#     df = pd.DataFrame(data)
     
-    # Write DataFrame to CSV string buffer
-    output = io.StringIO()
-    df.to_csv(output, index=False)
+#     # Write DataFrame to CSV string buffer
+#     output = io.StringIO()
+#     df.to_csv(output, index=False)
     
-    return output.getvalue()
+#     return output.getvalue()
+
+
+def dict_list_to_json(data: list[dict]) -> str:
+    """Convert a list of dictionaries to a JSON string.
+    
+    Handles non-JSON serializable types like datetime by converting them to strings.
+    """
+    def json_serial(obj):
+        """JSON serializer for objects not serializable by default json code"""
+        # Handle datetime objects
+        if hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+        # Handle Decimal objects
+        if hasattr(obj, 'to_eng_string'):
+            return str(obj)
+        # Handle bytes
+        if isinstance(obj, bytes):
+            return obj.decode('utf-8')
+        # Handle any other non-serializable types by converting to string
+        try:
+            return str(obj)
+        except:
+            return None
+
+    return json.dumps(data, default=json_serial)
+
+########################################################
+# Dataclass definitions
+########################################################
+
+@dataclass
+class PromptArgument:
+    name: str
+    description: str
+    required: bool
+
+    def to_dict(self) -> dict:
+        """Convert the PromptArgument to a dictionary."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "required": self.required
+        }
+
+
+@dataclass
+class Prompt:
+    name: str
+    description: str
+    arguments: list[PromptArgument]
+
+    def to_dict(self) -> dict:
+        """Convert the Prompt to a dictionary."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "arguments": [argument.to_dict() for argument in self.arguments]
+        }
+    
+
+@dataclass
+class Resource:
+    uri: str
+    name: str
+    mimeType: str | None
+    description: str | None
+
+    def to_dict(self) -> dict:
+        """Convert the Resource to a dictionary."""
+        return {
+            "uri": self.uri,
+            "name": self.name,
+            "mimeType": self.mimeType,
+            "description": self.description
+        }
+
 
 @dataclass
 class ServerContext:
     db: MicrosoftAzureSQL
+    resources: list[Resource] | None
+
+    def to_dict(self) -> dict:
+        """Convert the ServerContext to a dictionary."""
+        return {
+            "db": {
+                "server": self.db.server,
+                "database": self.db.database
+            },
+            "resources": [resource.to_dict() for resource in (self.resources or [])]
+        }
+
+########################################################
+# Prompt definitions
+########################################################
+
+
+PROMPTS = {
+    "get_tables": Prompt(
+        name="get_tables",
+        description="Get all tables in the Azure SQL server",
+        arguments=[]
+    ),
+    "get_table_schema": Prompt(
+        name="get_table_schema",
+        description="Get the schema of a table in the Azure SQL server",
+        arguments=[
+            PromptArgument(name="table", description="The name of the table to get the schema of", required=True),
+            PromptArgument(name="schema", description="The schema of the table to get the schema of", required=True)
+        ]
+    ),
+    "execute_sql": Prompt(
+        name="execute_sql",
+        description="Execute an SQL query on the Azure SQL server",
+        arguments=[
+            PromptArgument(name="query", description="The SQL query to execute", required=True)
+        ]
+    )
+}
+
+########################################################
+# Server Functions
+########################################################    
 
 @asynccontextmanager
 async def server_lifespan(server: Server) -> AsyncIterator[ServerContext]:
@@ -184,6 +352,9 @@ async def server_lifespan(server: Server) -> AsyncIterator[ServerContext]:
     config = get_db_config()
     
     try:
+        logger.info("Initializing database connection and resources")
+
+        # Initialize database connection
         db = MicrosoftAzureSQL(
             server=config["server"],
             database=config["database"],
@@ -191,90 +362,82 @@ async def server_lifespan(server: Server) -> AsyncIterator[ServerContext]:
             client_secret=config["client_secret"],
             tenant_id=config["tenant_id"]
         )
-        await db.connect()
-        yield ServerContext(db=db)
+        
+        # Connect synchronously
+        db.connect()
+
+        logger.info("Database connection initialized")
+        logger.info("Executing query to get all tables")
+
+        # Execute query synchronously
+        results = db.execute_query(get_all_table_query())
+        resources = []
+        for table in results:
+            resource_to_add = Resource(
+                uri=f"azuresql://{db.server}/{db.database}/{table['SchemaName']}/{table['TableName']}/data",
+                name=f"{table['SchemaName']}.{table['TableName']}",
+                mimeType="text/plain",
+                description=f"Data in table: {table['SchemaName']}.{table['TableName']}"
+            )
+            resources.append(resource_to_add)
+
+        # Log out how many resources were found
+        logger.info(f"Found {len(resources)} resources")
+
+        # Yield server context with database connection and resources
+        yield ServerContext(db=db, resources=resources)
     finally:
         # Clean up on shutdown
-        await db.disconnect()
+        db.disconnect()
 
 
 # Initialize server
 server = Server("mssql_mcp_server", lifespan=server_lifespan)
 
-# @app.list_resources()
-# async def list_resources() -> list[Resource]:
-#     """List MSSQL tables as resources."""
-#     config = get_db_config()
-#     try:
-#         db = MicrosoftAzureSQL(
-#             server=config["server"],
-#             database=config["database"],
-#             client_id=config["client_id"],
-#             client_secret=config["client_secret"],
-#             tenant_id=config["tenant_id"]
-#         )
-#         db.connect()
-        
-#         # Use INFORMATION_SCHEMA to list tables in MSSQL
-#         results = db.execute_query("""
-#             SELECT TABLE_NAME 
-#             FROM INFORMATION_SCHEMA.TABLES 
-#             WHERE TABLE_TYPE = 'BASE TABLE'
-#                 AND TABLE_NAME LIKE '%DIM%';
-#         """)
-#         logger.info(f"Found tables: {results}")
-        
-#         resources = []
-#         for table in results:
-#             resources.append(
-#                 Resource(
-#                     uri=f"mssql://{table['TABLE_NAME']}/data",
-#                     name=f"Table: {table['TABLE_NAME']}",
-#                     mimeType="text/plain",
-#                     description=f"Data in table: {table['TABLE_NAME']}"
-#                 )
-#             )
-#         db.disconnect()
-#         return resources
-#     except Exception as e:
-#         logger.error(f"Failed to list resources: {str(e)}")
-#         return []
 
-# @app.read_resource()
-# async def read_resource(uri: AnyUrl) -> str:
-#     """Read table contents."""
-#     config = get_db_config()
-#     uri_str = str(uri)
-#     logger.info(f"Reading resource: {uri_str}")
+@server.list_prompts()
+async def list_prompts() -> list[dict]:
+    """List available prompts."""
+    logger.info("Listing prompts...")
+    return [prompt.to_dict() for prompt in PROMPTS.values()]
+
+
+@server.list_resources()
+async def list_resources() -> list[dict]:
+    """List Azure SQL tables as resources."""
+    logger.info("Listing resources...")
+    ctx = server.request_context
+    server_context: ServerContext = ctx.lifespan_context
+    resources = server_context.resources
+    return [resource.to_dict() for resource in resources]
     
-#     if not uri_str.startswith("mssql://"):
-#         raise ValueError(f"Invalid URI scheme: {uri_str}")
-        
-#     parts = uri_str[8:].split('/')
-#     table = parts[0]
+
+@server.read_resource()
+async def read_resource(uri: AnyUrl) -> str:
+    """Read table contents."""
+
+    # Get database connection
+    ctx = server.request_context
+    db: MicrosoftAzureSQL = ctx.lifespan_context.db
+
+    # Get table name from URI
+    uri_str = str(uri)
+    logger.info(f"Reading resource: {uri_str}")
     
-#     try:
-#         db = MicrosoftAzureSQL(
-#             server=config["server"],
-#             database=config["database"],
-#             client_id=config["client_id"],
-#             client_secret=config["client_secret"],
-#             tenant_id=config["tenant_id"]
-#         )
-#         db.connect()
-        
-#         results = db.execute_query(f"SELECT * FROM log.EDWAllTablesVw")
-#         if not results:
-#             return ""
-            
-#         # Convert results to CSV format
-#         return dict_list_to_csv(results)
-                
-#     except Exception as e:
-#         logger.error(f"Database error reading resource {uri}: {str(e)}")
-#         raise RuntimeError(f"Database error: {str(e)}")
-#     finally:
-#         db.disconnect()
+    if not uri_str.startswith("azuresql://"):
+        raise ValueError(f"Invalid URI scheme: {uri_str}")
+    
+    # Parse URI
+    logger.info(f"Parsing URI: {uri_str}")
+    uri_obj = parse_uri(uri_str)
+
+    # Execute query
+    results = db.execute_query(f"SELECT * FROM {uri_obj.schema}.{uri_obj.table}")
+
+    # Convert results to JSON
+    return dict_list_to_json(results)
+       
+
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
@@ -283,7 +446,30 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="get_tables",
-            description="Get all tables in the Azure SQL server"
+            description="Get all tables in the Azure SQL server",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        Tool(
+            name="get_table_schema",
+            description="Get the schema of a table in the Azure SQL server",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "The name of the table to get the schema of"
+                    },
+                    "schema": {
+                        "type": "string",
+                        "description": "The schema of the table to get the schema of"
+                    }   
+                },
+                "required": ["table", "schema"]
+            }
         ),
         Tool(
             name="execute_sql",
@@ -301,6 +487,7 @@ async def list_tools() -> list[Tool]:
         )
     ]
 
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Execute SQL commands."""
@@ -310,33 +497,41 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     logger.info(f"Calling tool: {name} with arguments: {arguments}")
     
-    if name not in ["execute_sql", "get_tables"]:
+    if name not in ["execute_sql", "get_tables", "get_table_schema"]:
         raise ValueError(f"Unknown tool: {name}")
     
     if name == "get_tables":
-        results = db.execute_query("SELECT * FROM log.EDWAllTablesVw")
-        return dict_list_to_csv(results)
+        results = db.execute_query(get_all_table_query())
+        return [TextContent(type="text", text=dict_list_to_json(results))]
+        
+    
+    if name == "get_table_schema":
+        table = arguments.get("table")
+        if not table:
+            raise ValueError("Table is required")
+        
+        schema = arguments.get("schema")
+        if not schema:
+            raise ValueError("Schema is required")
+        
+        query = get_table_schema_query(schema, table)
+        results = db.execute_query(query)
+        return [TextContent(type="text", text=dict_list_to_json(results))]
     
     query = arguments.get("query")
     if not query:
         raise ValueError("Query is required")
     
     try:
-       
-        # Special handling for listing tables in MSSQL
-        if query.strip().upper() == "SHOW TABLES":
-            results = db.execute_query("SELECT * FROM log.EDWAllTablesVw")
-            return dict_list_to_csv(results)
         
         # Regular SELECT queries
-        elif query.strip().upper().startswith("SELECT"):
+        if query.strip().upper().startswith("SELECT"):
             results = db.execute_query(query)
+
             if not results:
                 return [TextContent(type="text", text="No results found")]
                 
-            columns = results[0].keys()
-            rows = [[row[col] for col in columns] for row in results]
-            return [TextContent(type="text", text="\n".join([",".join(columns)] + [",".join(map(str, row)) for row in rows]))]
+            return [TextContent(type="text", text=dict_list_to_json(results))]
         
         # Non-SELECT queries
         else:
@@ -363,7 +558,7 @@ async def main():
                 write_stream,
                 InitializationOptions(
                     server_name="edw_mcp_server",
-                    server_description="EDW MCP Server",
+                    server_description="Azure SQL EDW Server",
                     server_version="1.0.0",
                     capabilities=server.get_capabilities(
                         notification_options=NotificationOptions(),
