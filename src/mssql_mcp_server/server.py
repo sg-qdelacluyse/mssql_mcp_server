@@ -4,10 +4,17 @@ import os
 import struct
 import adal
 import pyodbc
+import pandas as pd
+import io
+from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 from pathlib import Path
 from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.types import Resource, Tool, TextContent
+from mcp.server.lowlevel import NotificationOptions
+from mcp.server.models import InitializationOptions
 from pydantic import AnyUrl
 
 # Configure logging
@@ -55,6 +62,8 @@ class MicrosoftAzureSQL:
 
     def connect(self) -> None:
         """Connects to the Azure SQL database."""
+
+        logger.info(f"Connecting to {self.__connection_string}")
 
         context = adal.AuthenticationContext(
             self.__authority_url, api_version=None
@@ -112,9 +121,9 @@ class MicrosoftAzureSQL:
 def get_db_config():
     """Get database configuration from environment variables and .env file."""
     # Try to load .env file if it exists
-    env_path = Path('.env')
+    env_path = Path(__file__).parent.parent.parent.joinpath('.env')
+    logger.info(f"Loading configuration from {env_path}")
     if env_path.exists():
-        logger.info("Loading configuration from .env file")
         load_dotenv(env_path)
 
     # Debug logging to see all environment variables
@@ -141,89 +150,144 @@ def get_db_config():
     
     return config
 
-# Initialize server
-app = Server("mssql_mcp_server")
-
-@app.list_resources()
-async def list_resources() -> list[Resource]:
-    """List MSSQL tables as resources."""
-    config = get_db_config()
-    try:
-        db = MicrosoftAzureSQL(
-            server=config["server"],
-            database=config["database"],
-            client_id=config["client_id"],
-            client_secret=config["client_secret"],
-            tenant_id=config["tenant_id"]
-        )
-        db.connect()
-        
-        # Use INFORMATION_SCHEMA to list tables in MSSQL
-        results = db.execute_query("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE';")
-        logger.info(f"Found tables: {results}")
-        
-        resources = []
-        for table in results:
-            resources.append(
-                Resource(
-                    uri=f"mssql://{table['TABLE_NAME']}/data",
-                    name=f"Table: {table['TABLE_NAME']}",
-                    mimeType="text/plain",
-                    description=f"Data in table: {table['TABLE_NAME']}"
-                )
-            )
-        db.disconnect()
-        return resources
-    except Exception as e:
-        logger.error(f"Failed to list resources: {str(e)}")
-        return []
-
-@app.read_resource()
-async def read_resource(uri: AnyUrl) -> str:
-    """Read table contents."""
-    config = get_db_config()
-    uri_str = str(uri)
-    logger.info(f"Reading resource: {uri_str}")
+def dict_list_to_csv(data: list[dict]) -> str:
+    """Convert a list of flat dictionaries to CSV string.
     
-    if not uri_str.startswith("mssql://"):
-        raise ValueError(f"Invalid URI scheme: {uri_str}")
-        
-    parts = uri_str[8:].split('/')
-    table = parts[0]
-    
-    try:
-        db = MicrosoftAzureSQL(
-            server=config["server"],
-            database=config["database"],
-            client_id=config["client_id"],
-            client_secret=config["client_secret"],
-            tenant_id=config["tenant_id"]
-        )
-        db.connect()
-        
-        results = db.execute_query(f"SELECT * FROM {table} LIMIT 100")
-        if not results:
-            return ""
+    Args:
+        data: List of dictionaries where each dictionary has the same keys
+            and only contains simple values (no nested structures)
             
-        # Convert results to CSV format
-        columns = results[0].keys()
-        rows = [[row[col] for col in columns] for row in results]
-        return "\n".join([",".join(columns)] + [",".join(map(str, row)) for row in rows])
-                
-    except Exception as e:
-        logger.error(f"Database error reading resource {uri}: {str(e)}")
-        raise RuntimeError(f"Database error: {str(e)}")
-    finally:
-        db.disconnect()
+    Returns:
+        String containing CSV data with headers
+    """
+    if not data:
+        return ""
+        
 
-@app.list_tools()
+    # Convert list of dicts to DataFrame
+    df = pd.DataFrame(data)
+    
+    # Write DataFrame to CSV string buffer
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    
+    return output.getvalue()
+
+@dataclass
+class ServerContext:
+    db: MicrosoftAzureSQL
+
+@asynccontextmanager
+async def server_lifespan(server: Server) -> AsyncIterator[ServerContext]:
+    """Manage server startup and shutdown lifecycle."""
+    # Initialize resources on startup
+    config = get_db_config()
+    
+    try:
+        db = MicrosoftAzureSQL(
+            server=config["server"],
+            database=config["database"],
+            client_id=config["client_id"],
+            client_secret=config["client_secret"],
+            tenant_id=config["tenant_id"]
+        )
+        await db.connect()
+        yield ServerContext(db=db)
+    finally:
+        # Clean up on shutdown
+        await db.disconnect()
+
+
+# Initialize server
+server = Server("mssql_mcp_server", lifespan=server_lifespan)
+
+# @app.list_resources()
+# async def list_resources() -> list[Resource]:
+#     """List MSSQL tables as resources."""
+#     config = get_db_config()
+#     try:
+#         db = MicrosoftAzureSQL(
+#             server=config["server"],
+#             database=config["database"],
+#             client_id=config["client_id"],
+#             client_secret=config["client_secret"],
+#             tenant_id=config["tenant_id"]
+#         )
+#         db.connect()
+        
+#         # Use INFORMATION_SCHEMA to list tables in MSSQL
+#         results = db.execute_query("""
+#             SELECT TABLE_NAME 
+#             FROM INFORMATION_SCHEMA.TABLES 
+#             WHERE TABLE_TYPE = 'BASE TABLE'
+#                 AND TABLE_NAME LIKE '%DIM%';
+#         """)
+#         logger.info(f"Found tables: {results}")
+        
+#         resources = []
+#         for table in results:
+#             resources.append(
+#                 Resource(
+#                     uri=f"mssql://{table['TABLE_NAME']}/data",
+#                     name=f"Table: {table['TABLE_NAME']}",
+#                     mimeType="text/plain",
+#                     description=f"Data in table: {table['TABLE_NAME']}"
+#                 )
+#             )
+#         db.disconnect()
+#         return resources
+#     except Exception as e:
+#         logger.error(f"Failed to list resources: {str(e)}")
+#         return []
+
+# @app.read_resource()
+# async def read_resource(uri: AnyUrl) -> str:
+#     """Read table contents."""
+#     config = get_db_config()
+#     uri_str = str(uri)
+#     logger.info(f"Reading resource: {uri_str}")
+    
+#     if not uri_str.startswith("mssql://"):
+#         raise ValueError(f"Invalid URI scheme: {uri_str}")
+        
+#     parts = uri_str[8:].split('/')
+#     table = parts[0]
+    
+#     try:
+#         db = MicrosoftAzureSQL(
+#             server=config["server"],
+#             database=config["database"],
+#             client_id=config["client_id"],
+#             client_secret=config["client_secret"],
+#             tenant_id=config["tenant_id"]
+#         )
+#         db.connect()
+        
+#         results = db.execute_query(f"SELECT * FROM log.EDWAllTablesVw")
+#         if not results:
+#             return ""
+            
+#         # Convert results to CSV format
+#         return dict_list_to_csv(results)
+                
+#     except Exception as e:
+#         logger.error(f"Database error reading resource {uri}: {str(e)}")
+#         raise RuntimeError(f"Database error: {str(e)}")
+#     finally:
+#         db.disconnect()
+
+@server.list_tools()
 async def list_tools() -> list[Tool]:
-    """List available MSSQL tools."""
+    """List available Azure SQL tools."""
     logger.info("Listing tools...")
     return [
         Tool(
+            name="get_tables",
+            description="Get all tables in the Azure SQL server"
+        ),
+        Tool(
             name="execute_sql",
-            description="Execute an SQL query on the MSSQL server",
+            description="Execute an SQL query on the Azure SQL server",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -237,35 +301,32 @@ async def list_tools() -> list[Tool]:
         )
     ]
 
-@app.call_tool()
+@server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Execute SQL commands."""
-    config = get_db_config()
+
+    ctx = server.request_context
+    db: MicrosoftAzureSQL = ctx.lifespan_context.db
+
     logger.info(f"Calling tool: {name} with arguments: {arguments}")
     
-    if name != "execute_sql":
+    if name not in ["execute_sql", "get_tables"]:
         raise ValueError(f"Unknown tool: {name}")
+    
+    if name == "get_tables":
+        results = db.execute_query("SELECT * FROM log.EDWAllTablesVw")
+        return dict_list_to_csv(results)
     
     query = arguments.get("query")
     if not query:
         raise ValueError("Query is required")
     
     try:
-        db = MicrosoftAzureSQL(
-            server=config["server"],
-            database=config["database"],
-            client_id=config["client_id"],
-            client_secret=config["client_secret"],
-            tenant_id=config["tenant_id"]
-        )
-        db.connect()
-        
+       
         # Special handling for listing tables in MSSQL
         if query.strip().upper() == "SHOW TABLES":
-            results = db.execute_query("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE';")
-            result = [f"Tables_in_{config['database']}"]  # Header
-            result.extend([row['TABLE_NAME'] for row in results])
-            return [TextContent(type="text", text="\n".join(result))]
+            results = db.execute_query("SELECT * FROM log.EDWAllTablesVw")
+            return dict_list_to_csv(results)
         
         # Regular SELECT queries
         elif query.strip().upper().startswith("SELECT"):
@@ -285,8 +346,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     except Exception as e:
         logger.error(f"Error executing SQL '{query}': {e}")
         return [TextContent(type="text", text=f"Error executing query: {str(e)}")]
-    finally:
-        db.disconnect()
+    
 
 async def main():
     """Main entry point to run the MCP server."""
@@ -298,14 +358,23 @@ async def main():
     
     async with stdio_server() as (read_stream, write_stream):
         try:
-            await app.run(
+            await server.run(
                 read_stream,
                 write_stream,
-                app.create_initialization_options()
+                InitializationOptions(
+                    server_name="edw_mcp_server",
+                    server_description="EDW MCP Server",
+                    server_version="1.0.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={}
+                    )
+                )
             )
         except Exception as e:
             logger.error(f"Server error: {str(e)}", exc_info=True)
             raise
+
 
 if __name__ == "__main__":
     asyncio.run(main())
