@@ -1,11 +1,6 @@
 import asyncio
 import logging
 import os
-import struct
-import adal
-import pyodbc
-import pandas as pd
-import io
 import json
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
@@ -32,101 +27,6 @@ class AzureSQLURI:
     database: str
     schema: str
     table: str
-
-
-class MicrosoftAzureSQL:
-    """Class for interacting with Azure SQL database."""
-    
-    SQL_COPT_SS_ACCESS_TOKEN = 1256 
-    BASE_AUTHORITY_URL = 'https://login.microsoftonline.com/'
-
-    def __init__(self, server: str, database: str, client_id: str, client_secret: str, tenant_id: str) -> None:
-        """Initializes the class with the necessary credentials."""
-        self.server = server
-        self.database = database
-        self.__client_id = client_id
-        self.__client_secret = client_secret
-        self.__tenant_id = tenant_id
-        self.__authority_url = f"{ self.BASE_AUTHORITY_URL }{ self.__tenant_id }/"
-        self.__driver = '{ODBC Driver 17 for SQL Server}'
-        self.__connection_string = f"Driver={ self.__driver };SERVER={ self.server };DATABASE={ self.database }"
-        self.__connection = None
-
-
-    def __convert_token(self,token: dict) -> bytes:
-        """Converts a token obtained from Azure AD to a format usable by pyodbc."""
-    
-        #get bytes from token obtained
-        tokenb = bytes(token["accessToken"], "UTF-8")
-        exptoken = b''
-
-        for i in tokenb:
-            exptoken += bytes({i})
-            exptoken += bytes(1)
-
-        tokenstruct = struct.pack("=i", len(exptoken)) + exptoken
-
-        return tokenstruct
-
-
-    def connect(self) -> None:
-        """Connects to the Azure SQL database."""
-
-        logger.info(f"Connecting to {self.__connection_string}")
-
-        context = adal.AuthenticationContext(
-            self.__authority_url, api_version=None
-        )
-
-        token = context.acquire_token_with_client_credentials(
-            resource='https://database.windows.net/',
-            client_id=self.__client_id,
-            client_secret=self.__client_secret
-        )
-
-        converted_token = self.__convert_token(token)
-
-        self.__connection = pyodbc.connect(self.__connection_string, attrs_before = { self.SQL_COPT_SS_ACCESS_TOKEN:converted_token })
-
-        return self.__connection
-    
-
-    def disconnect(self) -> None:
-        """Disconnects from the Azure SQL database."""
-
-        self.__connection.close()
-
-
-    def execute_query(self, query: str, params: tuple = ()) -> list[dict]:
-        """Executes a query on the Azure SQL database with optional parameters and returns a list of dictionaries with column names as keys."""
-
-        cursor = self.__connection.cursor()
-        cursor.execute(query, params)
-        columns = [column[0] for column in cursor.description]
-        results = []
-        for row in cursor.fetchall():
-            results.append(dict(zip(columns, row)))
-        return results
-    
-    
-    def execute_insert_instant(self, query: str, params: tuple = ()) -> None:
-        """Executes an insert query on the Azure SQL database with optional parameters."""
-
-        cursor = self.__connection.cursor()
-        cursor.execute(query, params)
-        self.__connection.commit()
-
-
-    def execute_insert(self, query: str, params: tuple = ()) -> None:
-        """Executes an insert query on the Azure SQL database with optional parameters."""
-
-        cursor = self.__connection.cursor()
-        cursor.execute(query, params)
-
-
-    def commit(self) -> None:
-        """Commits the transaction."""
-        self.__connection.commit()
 
 
 def get_db_config():
@@ -184,6 +84,7 @@ def get_table_schema_query(schema: str, table: str) -> str:
             ,[ColumnID]
             ,[DataType]
             ,[CharacterLength]
+            ,[IsJoinOrAggregationKey]
         FROM [Log].[TableColumnVW]
         WHERE [SchemaName] = '{schema}'
             AND [TableName] = '{table}'
@@ -199,28 +100,6 @@ def parse_uri(uri: AnyUrl) -> AzureSQLURI:
 
     return AzureSQLURI(server=server, database=database, schema=schema, table=table)
 
-# def dict_list_to_csv(data: list[dict]) -> str:
-#     """Convert a list of flat dictionaries to CSV string.
-    
-#     Args:
-#         data: List of dictionaries where each dictionary has the same keys
-#             and only contains simple values (no nested structures)
-            
-#     Returns:
-#         String containing CSV data with headers
-#     """
-#     if not data:
-#         return ""
-        
-
-#     # Convert list of dicts to DataFrame
-#     df = pd.DataFrame(data)
-    
-#     # Write DataFrame to CSV string buffer
-#     output = io.StringIO()
-#     df.to_csv(output, index=False)
-    
-#     return output.getvalue()
 
 
 def dict_list_to_json(data: list[dict]) -> str:
